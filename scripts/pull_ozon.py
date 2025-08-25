@@ -1,4 +1,4 @@
-import os, sys, time, json, datetime as dt
+import os, sys, time, datetime as dt
 import requests
 import pandas as pd
 
@@ -30,10 +30,6 @@ def post_json(url, body):
         r.raise_for_status()
     return r.json()
 
-def chunked(lst, size):
-    for i in range(0, len(lst), size):
-        yield lst[i:i+size]
-
 # === 1. Список товаров ===
 def get_all_products():
     items, last_id = [], ""
@@ -58,7 +54,7 @@ def get_all_products():
 # === 2. Имена товаров ===
 def get_product_info(product_ids):
     info = {}
-    for batch in chunked(product_ids, 1000):
+    for batch in [product_ids[i:i+100] for i in range(0, len(product_ids), 100)]:
         body = {"product_id": batch}
         data = post_json(f"{BASE}/v3/product/info/list", body)
         items = data.get("result", {}).get("items", [])
@@ -75,7 +71,7 @@ def get_product_info(product_ids):
 # === 3. Аналитика (CTR) ===
 def get_analytics(product_ids, date_from, date_to):
     rows = []
-    for batch in chunked(product_ids, 200):
+    for pid in product_ids:
         body = {
             "date_from": date_from,
             "date_to": date_to,
@@ -84,8 +80,8 @@ def get_analytics(product_ids, date_from, date_to):
             "filters": [
                 {
                     "key": "product_id",
-                    "operator": "IN",
-                    "value": [str(x) for x in batch]  # 👈 теперь строки
+                    "operator": "EQ",        # 👈 одиночный фильтр
+                    "value": str(pid)
                 }
             ],
             "limit": 1000,
