@@ -8,99 +8,121 @@ API_KEY   = os.environ["OZON_API_KEY"]
 date_to   = datetime.utcnow().date() - timedelta(days=1)
 date_from = date_to - timedelta(days=29)
 
-url = "https://api-seller.ozon.ru/v1/analytics/data"
 headers = {"Client-Id": CLIENT_ID, "Api-Key": API_KEY}
+
+# --- 1. CTR по SKU ---
+url = "https://api-seller.ozon.ru/v1/analytics/data"
 body = {
     "date_from": str(date_from),
     "date_to":   str(date_to),
     "metrics":   ["hits_view","hits_click"],
-    "dimension": ["day","sku"],
-    "limit":     1000
+    "dimension": ["sku"],
+    "limit":     5000
 }
-
 r = requests.post(url, headers=headers, json=body, timeout=60)
 r.raise_for_status()
 payload = r.json()
 
-# --- агрегируем ---
-daily = defaultdict(lambda: {"shows":0,"clicks":0})
+stats = {}
 for row in payload.get("result", {}).get("data", []):
-    day = row["dimensions"][0]["id"]
+    sku = row["dimensions"][0]["id"]
     metrics = row.get("metrics", [])
     shows  = float(metrics[0]) if len(metrics) > 0 else 0
     clicks = float(metrics[1]) if len(metrics) > 1 else 0
-    daily[day]["shows"]  += shows
-    daily[day]["clicks"] += clicks
+    ctr    = (clicks / shows * 100.0) if shows > 0 else 0.0
+    stats[sku] = {
+        "shows": int(shows),
+        "clicks": int(clicks),
+        "ctr": round(ctr, 2),
+        "name": ""  # заполним позже
+    }
 
-# считаем CTR
-daily_final = []
-for day, v in sorted(daily.items()):
-    ctr = (v["clicks"]/v["shows"]*100) if v["shows"]>0 else 0
-    daily_final.append({"date":day,"shows":int(v["shows"]),"clicks":int(v["clicks"]),"ctr":round(ctr,2)})
+# --- 2. Названия товаров ---
+sku_list = list(stats.keys())
+names_url = "https://api-seller.ozon.ru/v2/product/info/list"
+for i in range(0, len(sku_list), 100):  # Ozon ограничивает пачки
+    batch = sku_list[i:i+100]
+    body = {"sku": batch}
+    r = requests.post(names_url, headers=headers, json=body, timeout=60)
+    r.raise_for_status()
+    for item in r.json().get("result", []):
+        s = str(item["id"])
+        if s in stats:
+            stats[s]["name"] = item.get("name", "")
 
-# агрегируем по неделям и месяцам
-weekly = defaultdict(lambda: {"shows":0,"clicks":0})
-monthly = defaultdict(lambda: {"shows":0,"clicks":0})
-for d in daily_final:
-    dt = datetime.strptime(d["date"], "%Y-%m-%d")
-    week = f"{dt.isocalendar().year}-W{dt.isocalendar().week}"
-    month = dt.strftime("%Y-%m")
-    weekly[week]["shows"] += d["shows"]; weekly[week]["clicks"] += d["clicks"]
-    monthly[month]["shows"] += d["shows"]; monthly[month]["clicks"] += d["clicks"]
-
-def finalize(data_dict):
-    arr=[]
-    for k,v in sorted(data_dict.items()):
-        ctr=(v["clicks"]/v["shows"]*100) if v["shows"]>0 else 0
-        arr.append({"date":k,"shows":int(v["shows"]),"clicks":int(v["clicks"]),"ctr":round(ctr,2)})
-    return arr
-
-weekly_final = finalize(weekly)
-monthly_final = finalize(monthly)
-
+# --- 3. Сохраняем JSON/CSV ---
 os.makedirs("site/data", exist_ok=True)
 
-with open("site/data/ctr.json","w",encoding="utf-8") as f:
-    json.dump({"daily":daily_final,"weekly":weekly_final,"monthly":monthly_final},f,ensure_ascii=False)
+rows = []
+for sku, v in stats.items():
+    rows.append([sku, v["name"], v["shows"], v["clicks"], v["ctr"]])
 
-# --- html ---
+# сортируем по CTR убыванию
+rows.sort(key=lambda x: x[4], reverse=True)
+
+with open("site/data/ctr.csv","w",newline="",encoding="utf-8") as f:
+    w = csv.writer(f)
+    w.writerow(["sku","name","shows","clicks","ctr"])
+    w.writerows(rows)
+
+with open("site/data/ctr.json","w",encoding="utf-8") as f:
+    json.dump(rows,f,ensure_ascii=False)
+
+# --- 4. HTML таблица ---
 index_html = """<!doctype html><html><head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Ozon CTR Dashboard</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-body{font-family:sans-serif;padding:24px;max-width:1100px;margin:0 auto}
-h1{margin:0 0 12px}
-.row{display:flex;gap:12px;align-items:center;margin:16px 0}
-button{padding:6px 12px}
-canvas{max-width:100%;}
+body{font-family:sans-serif;padding:24px;max-width:1200px;margin:0 auto}
+h1{margin-bottom:20px}
+table{border-collapse:collapse;width:100%}
+th,td{border:1px solid #ccc;padding:8px;text-align:left}
+th{cursor:pointer;background:#f3f3f3}
 </style>
 </head><body>
-<h1>Ozon CTR (суммарно по всем SKU)</h1>
-<div class="row">
-  <button onclick="draw('daily')">День</button>
-  <button onclick="draw('weekly')">Неделя</button>
-  <button onclick="draw('monthly')">Месяц</button>
-</div>
-<canvas id="chart" height="120"></canvas>
+<h1>Ozon CTR по SKU (последние 30 дней)</h1>
+<table id="ctrTable">
+<thead>
+<tr>
+  <th onclick="sortTable(0)">SKU</th>
+  <th onclick="sortTable(1)">Название</th>
+  <th onclick="sortTable(2)">Показы</th>
+  <th onclick="sortTable(3)">Клики</th>
+  <th onclick="sortTable(4)">CTR %</th>
+</tr>
+</thead><tbody id="tableBody"></tbody></table>
 <script>
-let data,chart,ctx;
 async function main(){
   const res = await fetch("data/ctr.json");
-  data = await res.json();
-  ctx = document.getElementById('chart').getContext('2d');
-  draw('daily');
+  const rows = await res.json();
+  const body = document.getElementById("tableBody");
+  body.innerHTML = "";
+  for(const r of rows){
+    const tr=document.createElement("tr");
+    tr.innerHTML = `<td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td><td>${r[4]}</td>`;
+    body.appendChild(tr);
+  }
 }
-function draw(mode){
-  const arr = data[mode] || [];
-  const labels = arr.map(x=>x.date);
-  const ctr = arr.map(x=>x.ctr);
-  if(chart) chart.destroy();
-  chart = new Chart(ctx,{ type:'line',
-    data:{ labels, datasets:[{ label:`CTR % (${mode})`, data: ctr, tension:0.3 }]},
-    options:{ responsive:true, interaction:{mode:'index', intersect:false},
-      scales:{ y:{ ticks:{ callback:(v)=>v+'%' }}}}
-  });
+function sortTable(n){
+  const table=document.getElementById("ctrTable");
+  let switching=true,dir="desc",switchcount=0;
+  while(switching){
+    switching=false;
+    const rows=table.rows;
+    for(let i=1;i<rows.length-1;i++){
+      let shouldSwitch=false;
+      const x=rows[i].getElementsByTagName("TD")[n];
+      const y=rows[i+1].getElementsByTagName("TD")[n];
+      let cmpx=isNaN(x.innerHTML)?x.innerHTML.toLowerCase():parseFloat(x.innerHTML)||0;
+      let cmpy=isNaN(y.innerHTML)?y.innerHTML.toLowerCase():parseFloat(y.innerHTML)||0;
+      if(dir=="asc"?cmpx>cmpy:cmpx<cmpy){shouldSwitch=true;break;}
+    }
+    if(shouldSwitch){
+      rows[i].parentNode.insertBefore(rows[i+1],rows[i]);
+      switching=true;switchcount++;
+    } else { if(switchcount==0 && dir=="asc"){dir="desc";switching=true;} }
+  }
 }
 main();
 </script></body></html>"""
@@ -108,4 +130,4 @@ main();
 with open("site/index.html","w",encoding="utf-8") as f:
     f.write(index_html)
 
-print("✅ Сайт собран: смотри папку site/")
+print("✅ Сайт собран: смотри site/index.html")
