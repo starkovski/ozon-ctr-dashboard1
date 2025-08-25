@@ -10,37 +10,37 @@ date_from = date_to - timedelta(days=29)
 
 headers = {"Client-Id": CLIENT_ID, "Api-Key": API_KEY}
 
-# --- 1. CTR по SKU ---
+# --- 1. CTR по SKU + день ---
 url = "https://api-seller.ozon.ru/v1/analytics/data"
 body = {
     "date_from": str(date_from),
     "date_to":   str(date_to),
     "metrics":   ["hits_view","hits_click"],
-    "dimension": ["sku"],
+    "dimension": ["day","sku"],
     "limit":     5000
 }
 r = requests.post(url, headers=headers, json=body, timeout=60)
+if r.status_code != 200:
+    print("Status:", r.status_code)
+    print("Body:", r.text)
 r.raise_for_status()
 payload = r.json()
 
-stats = {}
+# --- агрегируем за весь период по каждому SKU ---
+stats = defaultdict(lambda: {"shows":0,"clicks":0,"name":""})
+
 for row in payload.get("result", {}).get("data", []):
-    sku = row["dimensions"][0]["id"]
+    sku = row["dimensions"][1]["id"]   # [0]=day, [1]=sku
     metrics = row.get("metrics", [])
     shows  = float(metrics[0]) if len(metrics) > 0 else 0
     clicks = float(metrics[1]) if len(metrics) > 1 else 0
-    ctr    = (clicks / shows * 100.0) if shows > 0 else 0.0
-    stats[sku] = {
-        "shows": int(shows),
-        "clicks": int(clicks),
-        "ctr": round(ctr, 2),
-        "name": ""  # заполним позже
-    }
+    stats[sku]["shows"]  += shows
+    stats[sku]["clicks"] += clicks
 
 # --- 2. Названия товаров ---
 sku_list = list(stats.keys())
 names_url = "https://api-seller.ozon.ru/v2/product/info/list"
-for i in range(0, len(sku_list), 100):  # Ozon ограничивает пачки
+for i in range(0, len(sku_list), 100):
     batch = sku_list[i:i+100]
     body = {"sku": batch}
     r = requests.post(names_url, headers=headers, json=body, timeout=60)
@@ -50,15 +50,18 @@ for i in range(0, len(sku_list), 100):  # Ozon ограничивает пачк
         if s in stats:
             stats[s]["name"] = item.get("name", "")
 
-# --- 3. Сохраняем JSON/CSV ---
-os.makedirs("site/data", exist_ok=True)
-
+# --- 3. Считаем CTR ---
 rows = []
 for sku, v in stats.items():
-    rows.append([sku, v["name"], v["shows"], v["clicks"], v["ctr"]])
+    shows = v["shows"]
+    clicks = v["clicks"]
+    ctr = (clicks/shows*100) if shows>0 else 0
+    rows.append([sku, v["name"], int(shows), int(clicks), round(ctr,2)])
 
 # сортируем по CTR убыванию
 rows.sort(key=lambda x: x[4], reverse=True)
+
+os.makedirs("site/data", exist_ok=True)
 
 with open("site/data/ctr.csv","w",newline="",encoding="utf-8") as f:
     w = csv.writer(f)
