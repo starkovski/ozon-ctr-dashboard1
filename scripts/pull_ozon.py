@@ -16,7 +16,7 @@ headers = {"Client-Id": CLIENT_ID, "Api-Key": API_KEY}
 body = {
     "date_from": str(date_from),
     "date_to":   str(date_to),
-    "metrics":   ["shows","clicks","cr"],
+    "metrics":   ["shows","clicks"],   # убрали "cr"
     "dimension": ["day","sku"],
     "limit":     5000
 }
