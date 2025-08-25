@@ -2,21 +2,18 @@ import os, json, csv, requests
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-# 🔑 Берём ключи из GitHub Secrets
 CLIENT_ID = os.environ["OZON_CLIENT_ID"]
 API_KEY   = os.environ["OZON_API_KEY"]
 
-# Последние 30 дней
 date_to   = datetime.utcnow().date() - timedelta(days=1)
 date_from = date_to - timedelta(days=29)
 
-# Запрос к Ozon Analytics API (Premium)
 url = "https://api-seller.ozon.ru/v1/analytics/data"
 headers = {"Client-Id": CLIENT_ID, "Api-Key": API_KEY}
 body = {
     "date_from": str(date_from),
     "date_to":   str(date_to),
-    "metrics":   ["hits_view","hits_click"],  # Premium-метрики
+    "metrics":   ["hits_view","hits_click"],  # Premium метрики
     "dimension": ["day","sku"],
     "limit":     1000
 }
@@ -28,7 +25,6 @@ if r.status_code != 200:
 r.raise_for_status()
 payload = r.json()
 
-# Обработка результата
 by_sku = defaultdict(list)
 rows_flat = []
 
@@ -41,35 +37,23 @@ for row in payload.get("result", {}).get("data", []):
     clicks = float(metrics[1]) if len(metrics) > 1 else 0
     ctr    = (clicks / shows * 100.0) if shows > 0 else 0.0
 
-    rec = {
-        "date": day,
-        "shows": int(shows),
-        "clicks": int(clicks),
-        "ctr": round(ctr, 3)
-    }
+    rec = {"date": day, "shows": int(shows), "clicks": int(clicks), "ctr": round(ctr, 3)}
     by_sku[sku].append(rec)
     rows_flat.append([day, sku, int(shows), int(clicks), round(ctr,3)])
 
 for sku in by_sku:
     by_sku[sku].sort(key=lambda x: x["date"])
 
-# Папка для сайта
 os.makedirs("site/data", exist_ok=True)
 
-# JSON
 with open("site/data/ctr.json", "w", encoding="utf-8") as f:
-    json.dump({
-        "range": {"from": str(date_from), "to": str(date_to)},
-        "by_sku": by_sku
-    }, f, ensure_ascii=False)
+    json.dump({"range": {"from": str(date_from), "to": str(date_to)}, "by_sku": by_sku}, f, ensure_ascii=False)
 
-# CSV
 with open("site/data/ctr.csv", "w", newline="", encoding="utf-8") as f:
     w = csv.writer(f)
     w.writerow(["date","sku","shows","clicks","ctr"])
     w.writerows(rows_flat)
 
-# Простая страница
 index_html = """<!doctype html><html><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Ozon CTR Dashboard</title>
