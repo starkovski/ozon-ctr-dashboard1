@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta
 
-# 🔑 API ключи из GitHub Secrets
+# 🔑 Данные для авторизации
 CLIENT_ID = os.getenv("OZON_CLIENT_ID")
 API_KEY = os.getenv("OZON_API_KEY")
 
@@ -13,8 +13,10 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# === 1. Получение списка товаров ===
+# ===== ФУНКЦИИ =====
+
 def get_products():
+    """Получаем список всех товаров с product_id"""
     url = "https://api-seller.ozon.ru/v3/product/list"
     products = []
     page = 1
@@ -23,12 +25,17 @@ def get_products():
         body = {
             "page_size": 1000,
             "page": page,
-            "filter": {}
+            "filter": {
+                "visibility": "ALL"  # ✅ обязательно указывать
+            }
         }
         print(f"📦 Получаем товары (страница {page})...")
         r = requests.post(url, headers=HEADERS, json=body)
         print("👉 Код ответа:", r.status_code)
+        if r.status_code != 200:
+            print("👉 Ответ:", r.text)
         r.raise_for_status()
+
         data = r.json()["result"]
 
         if not data["items"]:
@@ -42,74 +49,90 @@ def get_products():
 
     return products
 
-# === 2. Получение аналитики ===
+
 def get_analytics(product_ids, date_from, date_to):
+    """Получаем аналитику по product_id"""
     url = "https://api-seller.ozon.ru/v1/analytics/data"
-    body = {
-        "date_from": date_from,
-        "date_to": date_to,
-        "metrics": ["hits_view", "hits_click"],
-        "dimension": ["product_id"],
-        "filters": [
-            {
-                "key": "product_id",
-                "value": product_ids,
-                "operator": "IN"
-            }
-        ],
-        "limit": 1000,
-        "offset": 0
-    }
+    analytics = []
 
-    print(f"📊 Получаем аналитику c {date_from} по {date_to}...")
-    r = requests.post(url, headers=HEADERS, json=body)
-    print("👉 Код ответа:", r.status_code)
-    print("👉 Пример ответа:", r.text[:300])
-    r.raise_for_status()
-    return r.json()
+    # Ozon разрешает максимум 1000 ID за раз
+    chunk_size = 1000
+    for i in range(0, len(product_ids), chunk_size):
+        chunk = product_ids[i:i + chunk_size]
 
-# === 3. Основной скрипт ===
+        body = {
+            "date_from": date_from,
+            "date_to": date_to,
+            "metrics": ["hits_view", "hits_click", "conv_tocart", "revenue"],
+            "dimension": ["sku"],  # группировка по SKU
+            "filters": [
+                {
+                    "key": "product_id",
+                    "value": list(map(str, chunk))
+                }
+            ],
+            "limit": 1000,
+            "offset": 0
+        }
+
+        print(f"📊 Получаем аналитику для {len(chunk)} товаров...")
+        r = requests.post(url, headers=HEADERS, json=body)
+        print("👉 Код ответа:", r.status_code)
+        if r.status_code != 200:
+            print("👉 Ответ:", r.text)
+        r.raise_for_status()
+
+        data = r.json()["result"]["data"]
+        analytics.extend(data)
+
+    return analytics
+
+
+# ===== ОСНОВНОЙ СКРИПТ =====
+
 if __name__ == "__main__":
-    # 📅 период (последние 30 дней)
-    date_to = datetime.today().strftime("%Y-%m-%d")
-    date_from = (datetime.today() - timedelta(days=30)).strftime("%Y-%m-%d")
-
-    # 1. получаем список товаров
+    print("📦 Получаем список товаров...")
     products = get_products()
-    product_map = {str(p["product_id"]): p for p in products}
-
-    # 2. достаём product_id
+    product_map = {str(p["product_id"]): p["name"] for p in products}
     product_ids = list(product_map.keys())
 
-    # ⚡️ если товаров >1000 — делим на чанки
-    all_rows = []
-    for i in range(0, len(product_ids), 1000):
-        chunk = product_ids[i:i+1000]
-        analytics = get_analytics(chunk, date_from, date_to)
+    print(f"✅ Найдено товаров: {len(product_ids)}")
 
-        for row in analytics.get("result", {}).get("data", []):
-            pid = row["dimensions"][0]["id"]
-            views = int(row["metrics"][0]) if len(row["metrics"]) > 0 else 0
-            clicks = int(row["metrics"][1]) if len(row["metrics"]) > 1 else 0
-            ctr = round((clicks / views * 100), 2) if views > 0 else 0
+    # Берем последние 30 дней
+    date_to = datetime.now().strftime("%Y-%m-%d")
+    date_from = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
 
-            product = product_map.get(pid, {})
-            all_rows.append({
-                "product_id": pid,
-                "offer_id": product.get("offer_id", ""),
-                "name": product.get("name", ""),
-                "views": views,
-                "clicks": clicks,
-                "ctr": ctr
-            })
+    print(f"📊 Период: {date_from} → {date_to}")
+    analytics = get_analytics(product_ids, date_from, date_to)
 
-    # 3. таблица + сортировка
-    df = pd.DataFrame(all_rows)
-    df = df.sort_values(by="ctr", ascending=False)
+    rows = []
+    for row in analytics:
+        sku = row["dimensions"][0]["id"]
+        name = product_map.get(sku, "Неизвестно")
+        metrics = row["metrics"]
 
-    print("\n✅ Готовая таблица CTR:")
-    print(df.head(20))  # показываем топ-20
+        views = float(metrics[0]) if len(metrics) > 0 else 0
+        clicks = float(metrics[1]) if len(metrics) > 1 else 0
+        cart = float(metrics[2]) if len(metrics) > 2 else 0
+        revenue = float(metrics[3]) if len(metrics) > 3 else 0
 
-    # сохраняем
-    df.to_csv("ozon_ctr.csv", index=False, encoding="utf-8-sig")
-    print("💾 Файл сохранён: ozon_ctr.csv")
+        ctr = (clicks / views * 100) if views > 0 else 0
+
+        rows.append({
+            "SKU": sku,
+            "Название": name,
+            "Показы": views,
+            "Клики": clicks,
+            "CTR %": round(ctr, 2),
+            "В корзину": cart,
+            "Выручка": revenue
+        })
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values(by="CTR %", ascending=False)
+
+    print("📊 Итоговая таблица:")
+    print(df.head(20))
+
+    df.to_csv("ozon_report.csv", index=False)
+    print("✅ Сохранено в ozon_report.csv")
