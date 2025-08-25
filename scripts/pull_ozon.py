@@ -35,9 +35,12 @@ rows_flat = []
 for row in payload.get("result", {}).get("data", []):
     day = row["dimensions"][0]["id"]
     sku = row["dimensions"][1]["id"]
-    shows  = float(row["metrics"][0])   # hits_view
-    clicks = float(row["metrics"][1])   # hits_click
+
+    metrics = row.get("metrics", [])
+    shows  = float(metrics[0]) if len(metrics) > 0 else 0
+    clicks = float(metrics[1]) if len(metrics) > 1 else 0
     ctr    = (clicks / shows * 100.0) if shows > 0 else 0.0
+
     rec = {
         "date": day,
         "shows": int(shows),
