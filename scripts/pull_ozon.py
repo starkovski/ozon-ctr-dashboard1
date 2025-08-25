@@ -3,9 +3,9 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta
 
-# Авторизация
-CLIENT_ID = os.environ["OZON_CLIENT_ID"]
-API_KEY = os.environ["OZON_API_KEY"]
+# 🔑 API ключи из GitHub Secrets
+CLIENT_ID = os.getenv("OZON_CLIENT_ID")
+API_KEY = os.getenv("OZON_API_KEY")
 
 HEADERS = {
     "Client-Id": CLIENT_ID,
@@ -13,89 +13,103 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-BASE_URL = "https://api-seller.ozon.ru"
-
-# --- Получение списка товаров ---
+# === 1. Получение списка товаров ===
 def get_products():
     url = "https://api-seller.ozon.ru/v3/product/list"
     products = []
-    last_id = ""
+    page = 1
 
     while True:
         body = {
-            "filter": {},
-            "last_id": last_id,
-            "limit": 1000
+            "page_size": 1000,
+            "page": page,
+            "filter": {}
         }
+        print(f"📦 Получаем товары (страница {page})...")
         r = requests.post(url, headers=HEADERS, json=body)
-        print("📦 Получаем список товаров...")
         print("👉 Код ответа:", r.status_code)
         r.raise_for_status()
+        data = r.json()["result"]
 
-        data = r.json()
-        items = data.get("result", {}).get("items", [])
-        if not items:
+        if not data["items"]:
             break
 
-        products.extend(items)
-        last_id = data.get("result", {}).get("last_id", "")
+        products.extend(data["items"])
 
-        if not last_id:  # товаров больше нет
+        if len(data["items"]) < 1000:
             break
+        page += 1
 
     return products
 
-# --- Получение информации по товарам ---
-def get_products_info(product_ids):
-    url = f"{BASE_URL}/v3/products/info/list"
-    body = {"product_id": product_ids}
-    r = requests.post(url, headers=HEADERS, json=body)
-    r.raise_for_status()
-    return r.json()["result"]["items"]
-
-# --- Получение аналитики ---
+# === 2. Получение аналитики ===
 def get_analytics(product_ids, date_from, date_to):
-    url = f"{BASE_URL}/v1/analytics/data"
+    url = "https://api-seller.ozon.ru/v1/analytics/data"
     body = {
         "date_from": date_from,
         "date_to": date_to,
         "metrics": ["hits_view", "hits_click"],
-        "dimension": ["sku"],
-        "filters": [{"key": "product_id", "value": [str(pid) for pid in product_ids]}],
+        "dimension": ["product_id"],
+        "filters": [
+            {
+                "key": "product_id",
+                "value": product_ids,
+                "operator": "IN"
+            }
+        ],
         "limit": 1000,
         "offset": 0
     }
+
+    print(f"📊 Получаем аналитику c {date_from} по {date_to}...")
     r = requests.post(url, headers=HEADERS, json=body)
+    print("👉 Код ответа:", r.status_code)
+    print("👉 Пример ответа:", r.text[:300])
     r.raise_for_status()
-    return r.json()["result"]["data"]
+    return r.json()
 
-# --- Основная логика ---
+# === 3. Основной скрипт ===
 if __name__ == "__main__":
-    # Дата (за последние 7 дней)
-    date_to = datetime.now().strftime("%Y-%m-%d")
-    date_from = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    # 📅 период (последние 30 дней)
+    date_to = datetime.today().strftime("%Y-%m-%d")
+    date_from = (datetime.today() - timedelta(days=30)).strftime("%Y-%m-%d")
 
-    print("📦 Получаем список товаров...")
+    # 1. получаем список товаров
     products = get_products()
-    product_ids = [p["product_id"] for p in products]
+    product_map = {str(p["product_id"]): p for p in products}
 
-    print("📊 Получаем аналитику...")
-    analytics = get_analytics(product_ids, date_from, date_to)
+    # 2. достаём product_id
+    product_ids = list(product_map.keys())
 
-    print("📝 Получаем названия товаров...")
-    product_info = get_products_info(product_ids)
-    product_map = {p["product_id"]: p["name"] for p in product_info}
+    # ⚡️ если товаров >1000 — делим на чанки
+    all_rows = []
+    for i in range(0, len(product_ids), 1000):
+        chunk = product_ids[i:i+1000]
+        analytics = get_analytics(chunk, date_from, date_to)
 
-    rows = []
-    for row in analytics:
-        pid = int(row["dimensions"][0]["id"])
-        name = product_map.get(pid, "Без названия")
-        views = row["metrics"][0] if len(row["metrics"]) > 0 else 0
-        clicks = row["metrics"][1] if len(row["metrics"]) > 1 else 0
-        ctr = (clicks / views * 100) if views else 0
-        rows.append([pid, name, views, clicks, round(ctr, 2)])
+        for row in analytics.get("result", {}).get("data", []):
+            pid = row["dimensions"][0]["id"]
+            views = int(row["metrics"][0]) if len(row["metrics"]) > 0 else 0
+            clicks = int(row["metrics"][1]) if len(row["metrics"]) > 1 else 0
+            ctr = round((clicks / views * 100), 2) if views > 0 else 0
 
-    df = pd.DataFrame(rows, columns=["product_id", "Название", "Просмотры", "Клики", "CTR %"])
-    df = df.sort_values(by="CTR %", ascending=False)
+            product = product_map.get(pid, {})
+            all_rows.append({
+                "product_id": pid,
+                "offer_id": product.get("offer_id", ""),
+                "name": product.get("name", ""),
+                "views": views,
+                "clicks": clicks,
+                "ctr": ctr
+            })
 
-    print(df.to_string(index=False))
+    # 3. таблица + сортировка
+    df = pd.DataFrame(all_rows)
+    df = df.sort_values(by="ctr", ascending=False)
+
+    print("\n✅ Готовая таблица CTR:")
+    print(df.head(20))  # показываем топ-20
+
+    # сохраняем
+    df.to_csv("ozon_ctr.csv", index=False, encoding="utf-8-sig")
+    print("💾 Файл сохранён: ozon_ctr.csv")
