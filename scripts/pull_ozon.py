@@ -29,7 +29,8 @@ body = {
     "date_to":   str(date_to),
     "metrics":   ["hits_view","hits_click"],
     "dimension": ["day","sku"],
-    "limit":     5000
+    "limit":     1000,
+    "offset":    0
 }
 payload = fetch(url, body)
 
