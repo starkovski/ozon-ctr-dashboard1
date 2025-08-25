@@ -2,7 +2,7 @@ import os, json, csv, requests
 from datetime import datetime, timedelta
 from collections import defaultdict
 
-# Берём ключи из GitHub Secrets
+# 🔑 Берём ключи из GitHub Secrets
 CLIENT_ID = os.environ["OZON_CLIENT_ID"]
 API_KEY   = os.environ["OZON_API_KEY"]
 
@@ -10,18 +10,21 @@ API_KEY   = os.environ["OZON_API_KEY"]
 date_to   = datetime.utcnow().date() - timedelta(days=1)
 date_from = date_to - timedelta(days=29)
 
-# Запрос к Ozon Analytics API
+# Запрос к Ozon Analytics API (Premium)
 url = "https://api-seller.ozon.ru/v1/analytics/data"
 headers = {"Client-Id": CLIENT_ID, "Api-Key": API_KEY}
 body = {
     "date_from": str(date_from),
     "date_to":   str(date_to),
-    "metrics":   ["shows","clicks"],   # убрали "cr"
+    "metrics":   ["hits_view","hits_click"],  # Premium-метрики
     "dimension": ["day","sku"],
-    "limit":     5000
+    "limit":     1000
 }
 
 r = requests.post(url, headers=headers, json=body, timeout=60)
+if r.status_code != 200:
+    print("Status:", r.status_code)
+    print("Body:", r.text)
 r.raise_for_status()
 payload = r.json()
 
@@ -32,13 +35,17 @@ rows_flat = []
 for row in payload.get("result", {}).get("data", []):
     day = row["dimensions"][0]["id"]
     sku = row["dimensions"][1]["id"]
-    shows  = float(row["metrics"][0])
-    clicks = float(row["metrics"][1])
-    cr     = float(row["metrics"][2]) if len(row["metrics"]) > 2 else 0.0
+    shows  = float(row["metrics"][0])   # hits_view
+    clicks = float(row["metrics"][1])   # hits_click
     ctr    = (clicks / shows * 100.0) if shows > 0 else 0.0
-    rec = {"date": day, "shows": int(shows), "clicks": int(clicks), "ctr": round(ctr, 3), "cr": round(cr, 3)}
+    rec = {
+        "date": day,
+        "shows": int(shows),
+        "clicks": int(clicks),
+        "ctr": round(ctr, 3)
+    }
     by_sku[sku].append(rec)
-    rows_flat.append([day, sku, int(shows), int(clicks), round(ctr,3), round(cr,3)])
+    rows_flat.append([day, sku, int(shows), int(clicks), round(ctr,3)])
 
 for sku in by_sku:
     by_sku[sku].sort(key=lambda x: x["date"])
@@ -48,12 +55,15 @@ os.makedirs("site/data", exist_ok=True)
 
 # JSON
 with open("site/data/ctr.json", "w", encoding="utf-8") as f:
-    json.dump({"range": {"from": str(date_from), "to": str(date_to)}, "by_sku": by_sku}, f, ensure_ascii=False)
+    json.dump({
+        "range": {"from": str(date_from), "to": str(date_to)},
+        "by_sku": by_sku
+    }, f, ensure_ascii=False)
 
 # CSV
 with open("site/data/ctr.csv", "w", newline="", encoding="utf-8") as f:
     w = csv.writer(f)
-    w.writerow(["date","sku","shows","clicks","ctr","cr"])
+    w.writerow(["date","sku","shows","clicks","ctr"])
     w.writerows(rows_flat)
 
 # Простая страница
@@ -78,12 +88,19 @@ canvas{max-width:100%;}
 <canvas id="chart" height="120"></canvas>
 <script>
 async function main(){
-  const res = await fetch("data/ctr.json");
+  const res = await fetch("data/ctr.json"); 
   const data = await res.json();
   const sel = document.getElementById("skuSel");
   const keys = Object.keys(data.by_sku).sort();
-  if(keys.length===0){ document.body.insertAdjacentHTML('beforeend','<p>Нет данных</p>'); return; }
-  for(const k of keys){ const o=document.createElement('option'); o.value=k; o.textContent=k; sel.appendChild(o); }
+  if(keys.length===0){ 
+    document.body.insertAdjacentHTML('beforeend','<p>Нет данных</p>'); 
+    return; 
+  }
+  for(const k of keys){ 
+    const o=document.createElement('option'); 
+    o.value=k; o.textContent=k; 
+    sel.appendChild(o); 
+  }
   const ctx = document.getElementById('chart').getContext('2d');
   let chart;
   function draw(sku){
@@ -95,7 +112,7 @@ async function main(){
       data:{ labels, datasets:[{ label:`CTR % (${sku})`, data: ctr, tension:0.3 }]},
       options:{ responsive:true, interaction:{mode:'index', intersect:false},
         scales:{ y:{ ticks:{ callback:(v)=>v+'%' }}}}
-    );
+    });
   }
   sel.addEventListener('change', e=>draw(e.target.value));
   draw(keys[0]);
