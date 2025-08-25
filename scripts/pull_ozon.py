@@ -54,7 +54,8 @@ def get_all_products():
 # === 2. Имена товаров ===
 def get_product_info(product_ids):
     info = {}
-    for batch in [product_ids[i:i+100] for i in range(0, len(product_ids), 100)]:
+    for batch_start in range(0, len(product_ids), 100):
+        batch = product_ids[batch_start:batch_start+100]
         body = {"product_id": batch}
         data = post_json(f"{BASE}/v3/product/info/list", body)
         items = data.get("result", {}).get("items", [])
@@ -63,7 +64,8 @@ def get_product_info(product_ids):
             if pid:
                 info[str(pid)] = {
                     "name": it.get("name", ""),
-                    "offer_id": it.get("offer_id", "")
+                    "offer_id": it.get("offer_id", ""),
+                    "sku": it.get("sku", "")
                 }
         time.sleep(0.2)
     return info
@@ -76,12 +78,12 @@ def get_analytics(product_ids, date_from, date_to):
             "date_from": date_from,
             "date_to": date_to,
             "metrics": ["hits_view", "hits_click"],
-            "dimension": ["product_id"],
+            "dimension": ["sku"],   # ✅ правильное измерение
             "filters": [
                 {
                     "key": "product_id",
-                    "operator": "EQ",        # 👈 одиночный фильтр
-                    "value": str(pid)
+                    "operator": "EQ",
+                    "value": str(pid)   # одиночный product_id как строка
                 }
             ],
             "limit": 1000,
@@ -89,11 +91,11 @@ def get_analytics(product_ids, date_from, date_to):
         }
         data = post_json(f"{BASE}/v1/analytics/data", body)
         for row in data.get("result", {}).get("data", []):
-            pid = row["dimensions"][0]["id"]
+            sku = row["dimensions"][0]["id"]
             m = row["metrics"]
             views = float(m[0]) if len(m) > 0 else 0
             clicks = float(m[1]) if len(m) > 1 else 0
-            rows.append((pid, views, clicks))
+            rows.append((pid, sku, views, clicks))
         time.sleep(0.2)
     return rows
 
@@ -107,12 +109,13 @@ info = get_product_info(product_ids)
 analytics = get_analytics(product_ids, date_from, date_to)
 
 rows = []
-for pid, views, clicks in analytics:
+for pid, sku, views, clicks in analytics:
     ctr = round(clicks / views * 100, 2) if views > 0 else 0
     meta = info.get(str(pid), {})
     rows.append({
         "product_id": pid,
-        "sku": meta.get("offer_id", ""),
+        "sku": sku or meta.get("sku", ""),
+        "offer_id": meta.get("offer_id", ""),
         "name": meta.get("name", ""),
         "views": int(views),
         "clicks": int(clicks),
