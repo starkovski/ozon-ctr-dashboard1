@@ -18,16 +18,32 @@ BASE_URL = "https://api-seller.ozon.ru"
 # --- Получение списка товаров ---
 def get_products():
     url = "https://api-seller.ozon.ru/v3/product/list"
-    body = {
-        "page_size": 1000,
-        "page": 1
-    }
-    r = requests.post(url, headers=HEADERS, json=body)
-    print("📦 Получаем список товаров...")
-    print("👉 Код ответа:", r.status_code)
-    print("👉 Ответ:", r.text[:500])  # первые 500 символов для проверки
-    r.raise_for_status()
-    return r.json()["result"]["items"]
+    products = []
+    last_id = ""
+
+    while True:
+        body = {
+            "filter": {},
+            "last_id": last_id,
+            "limit": 1000
+        }
+        r = requests.post(url, headers=HEADERS, json=body)
+        print("📦 Получаем список товаров...")
+        print("👉 Код ответа:", r.status_code)
+        r.raise_for_status()
+
+        data = r.json()
+        items = data.get("result", {}).get("items", [])
+        if not items:
+            break
+
+        products.extend(items)
+        last_id = data.get("result", {}).get("last_id", "")
+
+        if not last_id:  # товаров больше нет
+            break
+
+    return products
 
 # --- Получение информации по товарам ---
 def get_products_info(product_ids):
