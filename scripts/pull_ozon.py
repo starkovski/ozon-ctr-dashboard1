@@ -10,6 +10,18 @@ date_from = date_to - timedelta(days=29)
 
 headers = {"Client-Id": CLIENT_ID, "Api-Key": API_KEY}
 
+def fetch(url, body):
+    r = requests.post(url, headers=headers, json=body, timeout=60)
+    print("👉 Запрос к:", url)
+    print("👉 Тело:", json.dumps(body, ensure_ascii=False))
+    print("👉 Код ответа:", r.status_code)
+    try:
+        print("👉 Ответ:", r.json())
+    except:
+        print("👉 Ответ (текст):", r.text)
+    r.raise_for_status()
+    return r.json()
+
 # --- 1. CTR по SKU + день ---
 url = "https://api-seller.ozon.ru/v1/analytics/data"
 body = {
@@ -19,12 +31,7 @@ body = {
     "dimension": ["day","sku"],
     "limit":     5000
 }
-r = requests.post(url, headers=headers, json=body, timeout=60)
-if r.status_code != 200:
-    print("Status:", r.status_code)
-    print("Body:", r.text)
-r.raise_for_status()
-payload = r.json()
+payload = fetch(url, body)
 
 # --- агрегируем за весь период по каждому SKU ---
 stats = defaultdict(lambda: {"shows":0,"clicks":0,"name":""})
@@ -43,9 +50,8 @@ names_url = "https://api-seller.ozon.ru/v2/product/info/list"
 for i in range(0, len(sku_list), 100):
     batch = sku_list[i:i+100]
     body = {"sku": batch}
-    r = requests.post(names_url, headers=headers, json=body, timeout=60)
-    r.raise_for_status()
-    for item in r.json().get("result", []):
+    payload = fetch(names_url, body)
+    for item in payload.get("result", []):
         s = str(item["id"])
         if s in stats:
             stats[s]["name"] = item.get("name", "")
@@ -58,7 +64,6 @@ for sku, v in stats.items():
     ctr = (clicks/shows*100) if shows>0 else 0
     rows.append([sku, v["name"], int(shows), int(clicks), round(ctr,2)])
 
-# сортируем по CTR убыванию
 rows.sort(key=lambda x: x[4], reverse=True)
 
 os.makedirs("site/data", exist_ok=True)
