@@ -1,35 +1,29 @@
-name: Build & Deploy CTR Dashboard
+name: Ozon CTR Dashboard
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "15 06 * * *"  # каждый день 09:15 по Москве
-  workflow_dispatch: {}
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+    - cron: "0 9 * * *"   # запуск каждый день в 9:00 UTC
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - run: pip install requests
-      - env:
-          OZON_CLIENT_ID: ${{ secrets.OZON_CLIENT_ID }}
-          OZON_API_KEY:   ${{ secrets.OZON_API_KEY }}
-        run: python scripts/pull_ozon.py
-      - uses: actions/upload-pages-artifact@v3
-        with: { path: "site" }
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
     steps:
-      - id: deploy
-        uses: actions/deploy-pages@v4
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas
+
+      - name: Run script
+        env:
+          OZON_CLIENT_ID: ${{ secrets.OZON_CLIENT_ID }}
+          OZON_API_KEY: ${{ secrets.OZON_API_KEY }}
+        run: python scripts/pull_ozon.py
