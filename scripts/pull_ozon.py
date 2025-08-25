@@ -1,4 +1,4 @@
-import os, sys, time, datetime as dt, json
+import os, sys, time, datetime as dt
 import requests
 import pandas as pd
 
@@ -56,7 +56,7 @@ def get_all_products():
         time.sleep(0.2)
     return items
 
-# === 2. Получение SKU и названий ===
+# === 2. SKU и имена ===
 def get_product_info(product_ids):
     info = {}
     for batch in chunked(product_ids, 100):
@@ -74,7 +74,7 @@ def get_product_info(product_ids):
         time.sleep(0.3)
     return info
 
-# === 3. Аналитика (CTR) по SKU ===
+# === 3. Аналитика ===
 def get_analytics(sku_list, date_from, date_to):
     rows = []
     for batch in chunked(sku_list, 50):
@@ -95,7 +95,8 @@ def get_analytics(sku_list, date_from, date_to):
             m = row.get("metrics", [])
             views = float(m[0]) if len(m) > 0 else 0
             clicks = float(m[1]) if len(m) > 1 else 0
-            rows.append((sku, views, clicks))
+            ctr = round(clicks / views * 100, 2) if views > 0 else 0
+            rows.append((sku, views, clicks, ctr))
         time.sleep(0.5)
     return rows
 
@@ -110,8 +111,7 @@ sku_list = [v["sku"] for v in info.values() if v.get("sku")]
 analytics = get_analytics(sku_list, date_from, date_to)
 
 rows = []
-for sku, views, clicks in analytics:
-    ctr = round(clicks / views * 100, 2) if views > 0 else 0
+for sku, views, clicks, ctr in analytics:
     meta = next((v for v in info.values() if v["sku"] == sku), {})
     rows.append({
         "sku": sku,
@@ -123,8 +123,12 @@ for sku, views, clicks in analytics:
         "CTR_%": ctr
     })
 
-df = pd.DataFrame(rows)
-df = df.sort_values("CTR_%", ascending=False)
+# Если данных нет — создаём пустую таблицу с колонками
+if not rows:
+    df = pd.DataFrame(columns=["sku","product_id","offer_id","name","views","clicks","CTR_%"])
+else:
+    df = pd.DataFrame(rows)
+    df = df.sort_values("CTR_%", ascending=False)
 
 os.makedirs("site", exist_ok=True)
 df.to_csv("site/data.csv", index=False, encoding="utf-8-sig")
