@@ -13,47 +13,57 @@ headers = {"Client-Id": CLIENT_ID, "Api-Key": API_KEY}
 body = {
     "date_from": str(date_from),
     "date_to":   str(date_to),
-    "metrics":   ["hits_view","hits_click"],  # Premium метрики
+    "metrics":   ["hits_view","hits_click"],
     "dimension": ["day","sku"],
     "limit":     1000
 }
 
 r = requests.post(url, headers=headers, json=body, timeout=60)
-if r.status_code != 200:
-    print("Status:", r.status_code)
-    print("Body:", r.text)
 r.raise_for_status()
 payload = r.json()
 
-by_sku = defaultdict(list)
-rows_flat = []
-
+# --- агрегируем ---
+daily = defaultdict(lambda: {"shows":0,"clicks":0})
 for row in payload.get("result", {}).get("data", []):
     day = row["dimensions"][0]["id"]
-    sku = row["dimensions"][1]["id"]
-
     metrics = row.get("metrics", [])
     shows  = float(metrics[0]) if len(metrics) > 0 else 0
     clicks = float(metrics[1]) if len(metrics) > 1 else 0
-    ctr    = (clicks / shows * 100.0) if shows > 0 else 0.0
+    daily[day]["shows"]  += shows
+    daily[day]["clicks"] += clicks
 
-    rec = {"date": day, "shows": int(shows), "clicks": int(clicks), "ctr": round(ctr, 3)}
-    by_sku[sku].append(rec)
-    rows_flat.append([day, sku, int(shows), int(clicks), round(ctr,3)])
+# считаем CTR
+daily_final = []
+for day, v in sorted(daily.items()):
+    ctr = (v["clicks"]/v["shows"]*100) if v["shows"]>0 else 0
+    daily_final.append({"date":day,"shows":int(v["shows"]),"clicks":int(v["clicks"]),"ctr":round(ctr,2)})
 
-for sku in by_sku:
-    by_sku[sku].sort(key=lambda x: x["date"])
+# агрегируем по неделям и месяцам
+weekly = defaultdict(lambda: {"shows":0,"clicks":0})
+monthly = defaultdict(lambda: {"shows":0,"clicks":0})
+for d in daily_final:
+    dt = datetime.strptime(d["date"], "%Y-%m-%d")
+    week = f"{dt.isocalendar().year}-W{dt.isocalendar().week}"
+    month = dt.strftime("%Y-%m")
+    weekly[week]["shows"] += d["shows"]; weekly[week]["clicks"] += d["clicks"]
+    monthly[month]["shows"] += d["shows"]; monthly[month]["clicks"] += d["clicks"]
+
+def finalize(data_dict):
+    arr=[]
+    for k,v in sorted(data_dict.items()):
+        ctr=(v["clicks"]/v["shows"]*100) if v["shows"]>0 else 0
+        arr.append({"date":k,"shows":int(v["shows"]),"clicks":int(v["clicks"]),"ctr":round(ctr,2)})
+    return arr
+
+weekly_final = finalize(weekly)
+monthly_final = finalize(monthly)
 
 os.makedirs("site/data", exist_ok=True)
 
-with open("site/data/ctr.json", "w", encoding="utf-8") as f:
-    json.dump({"range": {"from": str(date_from), "to": str(date_to)}, "by_sku": by_sku}, f, ensure_ascii=False)
+with open("site/data/ctr.json","w",encoding="utf-8") as f:
+    json.dump({"daily":daily_final,"weekly":weekly_final,"monthly":monthly_final},f,ensure_ascii=False)
 
-with open("site/data/ctr.csv", "w", newline="", encoding="utf-8") as f:
-    w = csv.writer(f)
-    w.writerow(["date","sku","shows","clicks","ctr"])
-    w.writerows(rows_flat)
-
+# --- html ---
 index_html = """<!doctype html><html><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Ozon CTR Dashboard</title>
@@ -62,51 +72,39 @@ index_html = """<!doctype html><html><head>
 body{font-family:sans-serif;padding:24px;max-width:1100px;margin:0 auto}
 h1{margin:0 0 12px}
 .row{display:flex;gap:12px;align-items:center;margin:16px 0}
-select,button{padding:8px 10px}
+button{padding:6px 12px}
 canvas{max-width:100%;}
 </style>
 </head><body>
-<h1>Ozon CTR (по SKU и по дням)</h1>
+<h1>Ozon CTR (суммарно по всем SKU)</h1>
 <div class="row">
-  <label for="skuSel">SKU:</label>
-  <select id="skuSel"></select>
-  <button id="dl">Скачать CSV</button>
+  <button onclick="draw('daily')">День</button>
+  <button onclick="draw('weekly')">Неделя</button>
+  <button onclick="draw('monthly')">Месяц</button>
 </div>
 <canvas id="chart" height="120"></canvas>
 <script>
+let data,chart,ctx;
 async function main(){
-  const res = await fetch("data/ctr.json"); 
-  const data = await res.json();
-  const sel = document.getElementById("skuSel");
-  const keys = Object.keys(data.by_sku).sort();
-  if(keys.length===0){ 
-    document.body.insertAdjacentHTML('beforeend','<p>Нет данных</p>'); 
-    return; 
-  }
-  for(const k of keys){ 
-    const o=document.createElement('option'); 
-    o.value=k; o.textContent=k; 
-    sel.appendChild(o); 
-  }
-  const ctx = document.getElementById('chart').getContext('2d');
-  let chart;
-  function draw(sku){
-    const arr = data.by_sku[sku] || [];
-    const labels = arr.map(x=>x.date);
-    const ctr = arr.map(x=>x.ctr);
-    if(chart) chart.destroy();
-    chart = new Chart(ctx,{ type:'line',
-      data:{ labels, datasets:[{ label:`CTR % (${sku})`, data: ctr, tension:0.3 }]},
-      options:{ responsive:true, interaction:{mode:'index', intersect:false},
-        scales:{ y:{ ticks:{ callback:(v)=>v+'%' }}}}
-    });
-  }
-  sel.addEventListener('change', e=>draw(e.target.value));
-  draw(keys[0]);
-  document.getElementById('dl').onclick=()=>{ window.location='data/ctr.csv'; };
+  const res = await fetch("data/ctr.json");
+  data = await res.json();
+  ctx = document.getElementById('chart').getContext('2d');
+  draw('daily');
+}
+function draw(mode){
+  const arr = data[mode] || [];
+  const labels = arr.map(x=>x.date);
+  const ctr = arr.map(x=>x.ctr);
+  if(chart) chart.destroy();
+  chart = new Chart(ctx,{ type:'line',
+    data:{ labels, datasets:[{ label:`CTR % (${mode})`, data: ctr, tension:0.3 }]},
+    options:{ responsive:true, interaction:{mode:'index', intersect:false},
+      scales:{ y:{ ticks:{ callback:(v)=>v+'%' }}}}
+  });
 }
 main();
 </script></body></html>"""
+
 with open("site/index.html","w",encoding="utf-8") as f:
     f.write(index_html)
 
