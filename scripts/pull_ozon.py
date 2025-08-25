@@ -1,4 +1,4 @@
-import os, sys, time, datetime as dt
+import os, sys, time, datetime as dt, json
 import requests
 import pandas as pd
 
@@ -22,69 +22,69 @@ today = dt.date.today()
 date_to = (today - dt.timedelta(days=1)).strftime("%Y-%m-%d")
 date_from = (today - dt.timedelta(days=30)).strftime("%Y-%m-%d")
 
-def post_json(url, body):
-    r = requests.post(url, headers=HEADERS, json=body, timeout=60)
-    if r.status_code >= 400:
-        print("👉 Код ответа:", r.status_code)
-        print("👉 Ответ:", r.text[:500])
-        r.raise_for_status()
-    return r.json()
+def post_json(url, body, retries=3):
+    for attempt in range(retries):
+        r = requests.post(url, headers=HEADERS, json=body, timeout=60)
+        if r.status_code == 429:  # rate limit
+            wait = 2 ** attempt
+            print(f"⏳ Rate limit, жду {wait} сек...")
+            time.sleep(wait)
+            continue
+        if r.status_code >= 400:
+            print("👉 Код ответа:", r.status_code)
+            print("👉 Ответ:", r.text[:200])
+            r.raise_for_status()
+        return r.json()
+    raise Exception("Не удалось получить ответ (после retry)")
+
+def chunked(lst, size):
+    for i in range(0, len(lst), size):
+        yield lst[i:i+size]
 
 # === 1. Список товаров ===
 def get_all_products():
     items, last_id = [], ""
     while True:
-        body = {
-            "filter": {"visibility": "ALL"},
-            "last_id": last_id,
-            "limit": 1000
-        }
+        body = {"filter": {"visibility": "ALL"}, "last_id": last_id, "limit": 1000}
         data = post_json(f"{BASE}/v3/product/list", body)
         result = data.get("result", {})
         batch = result.get("items", [])
-        if not batch:
-            break
+        if not batch: break
         items.extend(batch)
         last_id = result.get("last_id", "")
-        if not last_id:
-            break
+        if not last_id: break
         time.sleep(0.2)
     return items
 
-# === 2. Имена товаров ===
+# === 2. Получение SKU и названий ===
 def get_product_info(product_ids):
     info = {}
-    for batch_start in range(0, len(product_ids), 100):
-        batch = product_ids[batch_start:batch_start+100]
+    for batch in chunked(product_ids, 100):
         body = {"product_id": batch}
         data = post_json(f"{BASE}/v3/product/info/list", body)
         items = data.get("result", {}).get("items", [])
         for it in items:
-            pid = it.get("product_id")
+            pid = str(it.get("product_id"))
             if pid:
-                info[str(pid)] = {
+                info[pid] = {
+                    "sku": str(it.get("sku", "")),
                     "name": it.get("name", ""),
-                    "offer_id": it.get("offer_id", ""),
-                    "sku": it.get("sku", "")
+                    "offer_id": it.get("offer_id", "")
                 }
-        time.sleep(0.2)
+        time.sleep(0.3)
     return info
 
-# === 3. Аналитика (CTR) ===
-def get_analytics(product_ids, date_from, date_to):
+# === 3. Аналитика (CTR) по SKU ===
+def get_analytics(sku_list, date_from, date_to):
     rows = []
-    for pid in product_ids:
+    for batch in chunked(sku_list, 50):
         body = {
             "date_from": date_from,
             "date_to": date_to,
             "metrics": ["hits_view", "hits_click"],
-            "dimension": ["sku"],   # ✅ правильное измерение
+            "dimension": ["sku"],
             "filters": [
-                {
-                    "key": "product_id",
-                    "operator": "EQ",
-                    "value": str(pid)   # одиночный product_id как строка
-                }
+                {"key": "sku", "operator": "IN", "value": batch}
             ],
             "limit": 1000,
             "offset": 0
@@ -92,11 +92,11 @@ def get_analytics(product_ids, date_from, date_to):
         data = post_json(f"{BASE}/v1/analytics/data", body)
         for row in data.get("result", {}).get("data", []):
             sku = row["dimensions"][0]["id"]
-            m = row["metrics"]
+            m = row.get("metrics", [])
             views = float(m[0]) if len(m) > 0 else 0
             clicks = float(m[1]) if len(m) > 1 else 0
-            rows.append((pid, sku, views, clicks))
-        time.sleep(0.2)
+            rows.append((sku, views, clicks))
+        time.sleep(0.5)
     return rows
 
 # === MAIN ===
@@ -105,16 +105,17 @@ product_ids = [p["product_id"] for p in products]
 print(f"✅ Найдено товаров: {len(product_ids)}")
 
 info = get_product_info(product_ids)
+sku_list = [v["sku"] for v in info.values() if v.get("sku")]
 
-analytics = get_analytics(product_ids, date_from, date_to)
+analytics = get_analytics(sku_list, date_from, date_to)
 
 rows = []
-for pid, sku, views, clicks in analytics:
+for sku, views, clicks in analytics:
     ctr = round(clicks / views * 100, 2) if views > 0 else 0
-    meta = info.get(str(pid), {})
+    meta = next((v for v in info.values() if v["sku"] == sku), {})
     rows.append({
-        "product_id": pid,
-        "sku": sku or meta.get("sku", ""),
+        "sku": sku,
+        "product_id": meta.get("product_id", ""),
         "offer_id": meta.get("offer_id", ""),
         "name": meta.get("name", ""),
         "views": int(views),
